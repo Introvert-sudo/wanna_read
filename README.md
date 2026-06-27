@@ -1,17 +1,18 @@
-# wanna_read
+# Wanna-read
 
-A new Flutter project.
+A simple and effective mobile app for converting physical books into audiobooks.
 
-## Getting Started
+## Main features
 
-This project is a starting point for a Flutter application.
+* Automatic page boundary detection and document cropping.
+* Image pre-filtering for better text recognition.
+* Quickly extract text from images directly on the device using a [`Tesseract OCR`](https://github.com/tesseract-ocr/tesseract).
 
-A few resources to get you started if this is your first Flutter project:
+## Download
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+[`Download last version`](https://github.com/Introvert-sudo/wanna_read/releases/download/v1.0.0-alpha/Wanna-read.apk)
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## Tech stack
+* **Framework:** Flutter
+* **OCR:** Tesseract OCR
+* **TTS:** Flutter Text-to-Speech
