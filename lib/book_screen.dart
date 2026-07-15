@@ -267,7 +267,7 @@ class _BookScreenState extends State<BookScreen> {
           child: Image.file(
             File(page.imagePath),
             fit: BoxFit.contain,
-            errorBuilder: (_, __, ___) => const Center(
+            errorBuilder: (_, _, _) => const Center(
               child: Icon(Icons.broken_image_outlined, size: 64, color: Colors.white24),
             ),
           ),
@@ -418,7 +418,7 @@ class _PageSearchDelegate extends SearchDelegate<int?> {
 
     return ListView.separated(
       itemCount: filtered.length,
-      separatorBuilder: (_, __) => const Divider(height: 1, color: Colors.white10),
+      separatorBuilder: (_, _) => const Divider(height: 1, color: Colors.white10),
       itemBuilder: (context, i) {
         final idx = filtered[i].key;
         final page = filtered[i].value;

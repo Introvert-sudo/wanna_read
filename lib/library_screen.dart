@@ -162,7 +162,7 @@ class _BookCard extends StatelessWidget {
                   ? Image.file(
                       File(firstPage.imagePath),
                       fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => const _EmptyCover(),
+                      errorBuilder: (_, _, _) => const _EmptyCover(),
                     )
                   : const _EmptyCover(),
             ),
@@ -204,7 +204,7 @@ class _EmptyCover extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: Colors.white08,
+      color: Colors.white12,
       child: const Icon(Icons.menu_book_rounded, size: 52, color: Colors.white12),
     );
   }
