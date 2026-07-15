@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math';
 
 import 'package:dartcv4/dartcv.dart' as cv;
 import 'package:flutter/material.dart';
@@ -26,6 +27,7 @@ class _BookScreenState extends State<BookScreen> {
   int _currentPage = 0;
   bool _speaking = false;
   bool _scanning = false;
+  bool _autoContinuingTts = false;
 
   @override
   void initState() {
@@ -33,7 +35,8 @@ class _BookScreenState extends State<BookScreen> {
     _book = widget.book;
     _pageController = PageController();
     _tts.setCompletionHandler(() {
-      if (mounted) setState(() => _speaking = false);
+      if (!_autoContinuingTts && mounted) setState(() => _speaking = false);
+      _autoContinuingTts = false;
     });
   }
 
@@ -44,9 +47,73 @@ class _BookScreenState extends State<BookScreen> {
     super.dispose();
   }
 
+  // ── TTS ─────────────────────────────────────────────────────────────────────
+
+  Future<void> _speakPage(int idx) async {
+    if (idx < 0 || idx >= _book.pages.length) return;
+    _autoContinuingTts = true;
+    await _tts.stop();
+    if (!mounted || !_speaking) return;
+    await _tts.setLanguage(_book.lang.ttsLocale);
+    await _tts.setSpeechRate(0.45);
+    await _tts.speak(_book.pages[idx].text);
+  }
+
+  Future<void> _toggleTts() async {
+    if (_book.pages.isEmpty) return;
+    if (_speaking) {
+      await _tts.stop();
+      setState(() => _speaking = false);
+    } else {
+      setState(() => _speaking = true);
+      await _speakPage(_currentPage);
+    }
+  }
+
+  void _onPageChanged(int idx) {
+    final wasSpeaking = _speaking;
+    setState(() => _currentPage = idx);
+    if (wasSpeaking) _speakPage(idx);
+  }
+
+  // ── Scan (add new page) ──────────────────────────────────────────────────────
+
   Future<void> _scan() async {
     if (_scanning) return;
+    final result = await _runScanPipeline();
+    if (result == null || !mounted) return;
+    final (imagePath, text) = result;
+    final page = BookPage(id: genId(), imagePath: imagePath, text: text);
+    _book.pages.add(page);
+    await BookStorage.saveBook(_book);
+    if (!mounted) return;
+    setState(() => _scanning = false);
+    _pageController.animateToPage(
+      _book.pages.length - 1,
+      duration: const Duration(milliseconds: 400),
+      curve: Curves.easeInOut,
+    );
+  }
 
+  // ── Rescan current page ──────────────────────────────────────────────────────
+
+  Future<void> _rescanCurrentPage() async {
+    if (_scanning || _book.pages.isEmpty) return;
+    final oldPage = _book.pages[_currentPage];
+    final result = await _runScanPipeline();
+    if (result == null || !mounted) return;
+    final (imagePath, text) = result;
+    // delete old image
+    try { await File(oldPage.imagePath).delete(); } catch (_) {}
+    _book.pages[_currentPage] = oldPage.copyWith(imagePath: imagePath, text: text);
+    await BookStorage.saveBook(_book);
+    if (mounted) setState(() => _scanning = false);
+  }
+
+  // ── Shared scan pipeline ─────────────────────────────────────────────────────
+
+  /// Returns (stableImagePath, normalizedText) or null on cancel/error.
+  Future<(String, String)?> _runScanPipeline() async {
     final dir = await getApplicationSupportDirectory();
     final scanPath = p.join(dir.path, 'scan_${DateTime.now().millisecondsSinceEpoch}.jpeg');
 
@@ -58,7 +125,7 @@ class _BookScreenState extends State<BookScreen> {
       androidCropBlackWhiteTitle: 'B&W',
       androidCropReset: 'Reset',
     );
-    if (!success || !mounted) return;
+    if (!success || !mounted) return null;
 
     setState(() => _scanning = true);
 
@@ -90,51 +157,71 @@ class _BookScreenState extends State<BookScreen> {
       final stablePath = p.join(bookDirectory.path, 'page_$pageId.png');
       await File(tmpProcessed).copy(stablePath);
 
-      final page = BookPage(
-        id: pageId,
-        imagePath: stablePath,
-        text: text.isEmpty ? '(no text detected)' : text,
-      );
-      _book.pages.add(page);
-      await BookStorage.saveBook(_book);
-
-      if (mounted) {
-        setState(() => _scanning = false);
-        _pageController.animateToPage(
-          _book.pages.length - 1,
-          duration: const Duration(milliseconds: 400),
-          curve: Curves.easeInOut,
-        );
-      }
+      return (stablePath, text.isEmpty ? '(no text detected)' : text);
     } catch (e) {
       if (mounted) {
         setState(() => _scanning = false);
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
       }
+      return null;
     }
   }
 
-  Future<void> _toggleTts() async {
+  // ── Delete current page ───────────────────────────────────────────────────────
+
+  Future<void> _deleteCurrentPage() async {
     if (_book.pages.isEmpty) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Delete page?'),
+        content: Text('Delete page ${_currentPage + 1}? This cannot be undone.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.redAccent),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final page = _book.pages[_currentPage];
+    try { await File(page.imagePath).delete(); } catch (_) {}
+
     if (_speaking) {
+      _autoContinuingTts = true;
       await _tts.stop();
-      setState(() => _speaking = false);
+    }
+
+    _book.pages.removeAt(_currentPage);
+    await BookStorage.saveBook(_book);
+
+    if (!mounted) return;
+
+    if (_book.pages.isEmpty) {
+      setState(() { _currentPage = 0; _speaking = false; _autoContinuingTts = false; });
     } else {
-      final text = _book.pages[_currentPage].text;
-      setState(() => _speaking = true);
-      await _tts.setLanguage(_book.lang.ttsLocale);
-      await _tts.setSpeechRate(0.45);
-      await _tts.speak(text);
+      final newIdx = min(_currentPage, _book.pages.length - 1);
+      setState(() { _currentPage = newIdx; });
+      _pageController.jumpToPage(newIdx);
+      if (_speaking) _speakPage(newIdx);
     }
   }
 
-  void _onPageChanged(int idx) {
-    setState(() => _currentPage = idx);
-    if (_speaking) {
-      _tts.stop();
-      setState(() => _speaking = false);
-    }
+  // ── Mark as read ─────────────────────────────────────────────────────────────
+
+  Future<void> _toggleRead() async {
+    if (_book.pages.isEmpty) return;
+    final page = _book.pages[_currentPage];
+    _book.pages[_currentPage] = page.copyWith(isRead: !page.isRead);
+    await BookStorage.saveBook(_book);
+    setState(() {});
   }
+
+  // ── Navigation helpers ────────────────────────────────────────────────────────
 
   void _showJumpDialog() {
     if (_book.pages.isEmpty) return;
@@ -154,14 +241,8 @@ class _BookScreenState extends State<BookScreen> {
           onSubmitted: (_) => _jumpFromCtrl(ctrl),
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => _jumpFromCtrl(ctrl),
-            child: const Text('Go'),
-          ),
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          FilledButton(onPressed: () => _jumpFromCtrl(ctrl), child: const Text('Go')),
         ],
       ),
     );
@@ -171,11 +252,7 @@ class _BookScreenState extends State<BookScreen> {
     final n = int.tryParse(ctrl.text.trim());
     if (n != null && n >= 1 && n <= _book.pages.length) {
       Navigator.pop(context);
-      _pageController.animateToPage(
-        n - 1,
-        duration: const Duration(milliseconds: 350),
-        curve: Curves.easeInOut,
-      );
+      _pageController.animateToPage(n - 1, duration: const Duration(milliseconds: 350), curve: Curves.easeInOut);
     }
   }
 
@@ -185,13 +262,11 @@ class _BookScreenState extends State<BookScreen> {
       delegate: _PageSearchDelegate(_book.pages),
     );
     if (idx != null && idx >= 0 && mounted) {
-      _pageController.animateToPage(
-        idx,
-        duration: const Duration(milliseconds: 350),
-        curve: Curves.easeInOut,
-      );
+      _pageController.animateToPage(idx, duration: const Duration(milliseconds: 350), curve: Curves.easeInOut);
     }
   }
+
+  // ── Text normalization ────────────────────────────────────────────────────────
 
   String _normalizeForTts(String raw) {
     if (raw.isEmpty) return '';
@@ -207,6 +282,8 @@ class _BookScreenState extends State<BookScreen> {
         .trim();
   }
 
+  // ── Build ─────────────────────────────────────────────────────────────────────
+
   @override
   Widget build(BuildContext context) {
     final hasPages = _book.pages.isNotEmpty;
@@ -218,10 +295,28 @@ class _BookScreenState extends State<BookScreen> {
         actions: [
           _LangBadge(label: _book.lang.label),
           if (hasPages)
-            IconButton(
-              icon: const Icon(Icons.search),
-              onPressed: _openSearch,
-              tooltip: 'Search pages',
+            IconButton(icon: const Icon(Icons.search), onPressed: _openSearch, tooltip: 'Search pages'),
+          if (hasPages)
+            PopupMenuButton<_PageAction>(
+              icon: const Icon(Icons.more_vert),
+              onSelected: (action) {
+                if (action == _PageAction.rescan) _rescanCurrentPage();
+                if (action == _PageAction.delete) _deleteCurrentPage();
+              },
+              itemBuilder: (_) => const [
+                PopupMenuItem(value: _PageAction.rescan, child: ListTile(
+                  leading: Icon(Icons.document_scanner),
+                  title: Text('Rescan this page'),
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                )),
+                PopupMenuItem(value: _PageAction.delete, child: ListTile(
+                  leading: Icon(Icons.delete_outline, color: Colors.redAccent),
+                  title: Text('Delete this page', style: TextStyle(color: Colors.redAccent)),
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                )),
+              ],
             ),
         ],
       ),
@@ -267,7 +362,7 @@ class _BookScreenState extends State<BookScreen> {
           child: Image.file(
             File(page.imagePath),
             fit: BoxFit.contain,
-            errorBuilder: (_, _, _) => const Center(
+            errorBuilder: (_, __, ___) => const Center(
               child: Icon(Icons.broken_image_outlined, size: 64, color: Colors.white24),
             ),
           ),
@@ -303,6 +398,7 @@ class _BookScreenState extends State<BookScreen> {
   }
 
   Widget _buildBottomBar(bool hasPages) {
+    final page = hasPages ? _book.pages[_currentPage] : null;
     return SafeArea(
       child: Container(
         height: 64,
@@ -319,6 +415,16 @@ class _BookScreenState extends State<BookScreen> {
                 minimumSize: const Size(80, 48),
               ),
               child: Text(hasPages ? '${_currentPage + 1} / ${_book.pages.length}' : '–'),
+            ),
+            // Mark as read
+            IconButton(
+              iconSize: 26,
+              icon: Icon(
+                page?.isRead == true ? Icons.check_circle : Icons.check_circle_outline,
+                color: page?.isRead == true ? Colors.greenAccent : Colors.white38,
+              ),
+              onPressed: hasPages ? _toggleRead : null,
+              tooltip: page?.isRead == true ? 'Mark as unread' : 'Mark as read',
             ),
             const Spacer(),
             // TTS play/stop
@@ -344,7 +450,7 @@ class _BookScreenState extends State<BookScreen> {
                   : const Icon(Icons.document_scanner),
               color: Colors.white,
               onPressed: _scanning ? null : _scan,
-              tooltip: 'Scan page',
+              tooltip: 'Scan new page',
             ),
             const SizedBox(width: 4),
           ],
@@ -353,6 +459,8 @@ class _BookScreenState extends State<BookScreen> {
     );
   }
 }
+
+enum _PageAction { rescan, delete }
 
 class _LangBadge extends StatelessWidget {
   final String label;
@@ -418,20 +526,15 @@ class _PageSearchDelegate extends SearchDelegate<int?> {
 
     return ListView.separated(
       itemCount: filtered.length,
-      separatorBuilder: (_, _) => const Divider(height: 1, color: Colors.white10),
+      separatorBuilder: (_, __) => const Divider(height: 1, color: Colors.white10),
       itemBuilder: (context, i) {
         final idx = filtered[i].key;
         final page = filtered[i].value;
-        final preview = page.text.length > 120
-            ? '${page.text.substring(0, 120)}...'
-            : page.text;
+        final preview = page.text.length > 120 ? '${page.text.substring(0, 120)}...' : page.text;
         return ListTile(
           leading: CircleAvatar(
             backgroundColor: Colors.white12,
-            child: Text(
-              '${idx + 1}',
-              style: const TextStyle(fontSize: 13, color: Colors.white70),
-            ),
+            child: Text('${idx + 1}', style: const TextStyle(fontSize: 13, color: Colors.white70)),
           ),
           title: Text(
             preview,
@@ -439,6 +542,7 @@ class _PageSearchDelegate extends SearchDelegate<int?> {
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(fontSize: 14, color: Colors.white70, height: 1.4),
           ),
+          trailing: page.isRead ? const Icon(Icons.check_circle, size: 16, color: Colors.greenAccent) : null,
           onTap: () => close(context, idx),
         );
       },

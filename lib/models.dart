@@ -28,15 +28,24 @@ class BookPage {
   final String id;
   final String imagePath;
   final String text;
+  final bool isRead;
 
-  const BookPage({required this.id, required this.imagePath, required this.text});
+  const BookPage({required this.id, required this.imagePath, required this.text, this.isRead = false});
 
-  Map<String, dynamic> toJson() => {'id': id, 'imagePath': imagePath, 'text': text};
+  BookPage copyWith({String? imagePath, String? text, bool? isRead}) => BookPage(
+        id: id,
+        imagePath: imagePath ?? this.imagePath,
+        text: text ?? this.text,
+        isRead: isRead ?? this.isRead,
+      );
+
+  Map<String, dynamic> toJson() => {'id': id, 'imagePath': imagePath, 'text': text, 'isRead': isRead};
 
   factory BookPage.fromJson(Map<String, dynamic> j) => BookPage(
         id: j['id'] as String,
         imagePath: j['imagePath'] as String,
         text: j['text'] as String,
+        isRead: j['isRead'] as bool? ?? false,
       );
 }
 

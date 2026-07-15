@@ -146,6 +146,9 @@ class _BookCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final firstPage = book.pages.isNotEmpty ? book.pages.first : null;
+    final total = book.pages.length;
+    final readCount = book.pages.where((pg) => pg.isRead).length;
+    final progress = total > 0 ? readCount / total : 0.0;
 
     return Card(
       clipBehavior: Clip.antiAlias,
@@ -162,12 +165,12 @@ class _BookCard extends StatelessWidget {
                   ? Image.file(
                       File(firstPage.imagePath),
                       fit: BoxFit.cover,
-                      errorBuilder: (_, _, _) => const _EmptyCover(),
+                      errorBuilder: (_, __, ___) => const _EmptyCover(),
                     )
                   : const _EmptyCover(),
             ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+              padding: const EdgeInsets.fromLTRB(10, 10, 10, 6),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -183,13 +186,19 @@ class _BookCard extends StatelessWidget {
                       _LangBadge(label: book.lang.label),
                       const Spacer(),
                       Text(
-                        '${book.pages.length} ${book.pages.length == 1 ? 'page' : 'pages'}',
+                        total == 0 ? '0 pages' : '$readCount / $total read',
                         style: const TextStyle(fontSize: 12, color: Colors.white38),
                       ),
                     ],
                   ),
                 ],
               ),
+            ),
+            LinearProgressIndicator(
+              value: progress,
+              backgroundColor: Colors.white10,
+              color: Colors.greenAccent,
+              minHeight: 3,
             ),
           ],
         ),
