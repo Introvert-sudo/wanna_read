@@ -30,7 +30,6 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_edge_detection: ^1.2.0
   opencv_dart: ^2.2.1+4
   dartcv4: ^2.2.1+4
   flutter_tesseract_ocr: ^0.4.30
@@ -38,6 +37,9 @@ dependencies:
   path_provider: ^2.1.0
   path: ^1.9.0
   cupertino_icons: ^1.0.8
+  image_picker: ^1.1.2
+  audio_service: ^0.18.18
+  share_plus: ^10.1.4
 
 dev_dependencies:
   flutter_test:

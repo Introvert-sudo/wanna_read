@@ -137,3 +137,37 @@ class BookStorage {
     if (await dir.exists()) await dir.delete(recursive: true);
   }
 }
+
+class AppSettings {
+  double speechRate;
+  double fontSize;
+
+  AppSettings({this.speechRate = 0.45, this.fontSize = 15});
+
+  static Future<File> _file() async {
+    final docs = await getApplicationDocumentsDirectory();
+    return File(p.join(docs.path, 'settings.json'));
+  }
+
+  static Future<AppSettings> load() async {
+    try {
+      final file = await _file();
+      if (!await file.exists()) return AppSettings();
+      final json = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+      return AppSettings(
+        speechRate: (json['speechRate'] as num?)?.toDouble() ?? 0.45,
+        fontSize: (json['fontSize'] as num?)?.toDouble() ?? 15,
+      );
+    } catch (_) {
+      return AppSettings();
+    }
+  }
+
+  Future<void> save() async {
+    final file = await _file();
+    await file.writeAsString(jsonEncode({
+      'speechRate': speechRate,
+      'fontSize': fontSize,
+    }));
+  }
+}

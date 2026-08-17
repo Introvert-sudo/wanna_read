@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import 'book_screen.dart';
 import 'models.dart';
+import 'audio_handler.dart';
 
 class LibraryScreen extends StatefulWidget {
   const LibraryScreen({super.key});
@@ -67,6 +68,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       ),
     );
     if (confirmed != true) return;
+    if (audioHandler.book?.id == book.id) await audioHandler.stop();
     await BookStorage.deleteBook(book.id);
     setState(() => _books.remove(book));
   }

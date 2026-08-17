@@ -1,15 +1,18 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 
 import 'package:dartcv4/dartcv.dart' as cv;
 import 'package:flutter/material.dart';
-import 'package:flutter_edge_detection/flutter_edge_detection.dart';
 import 'package:flutter_tesseract_ocr/flutter_tesseract_ocr.dart';
-import 'package:flutter_tts/flutter_tts.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 
+import 'audio_handler.dart';
 import 'models.dart';
+import 'scanner_screen.dart';
 
 class BookScreen extends StatefulWidget {
   final Book book;
@@ -22,61 +25,73 @@ class BookScreen extends StatefulWidget {
 class _BookScreenState extends State<BookScreen> {
   late final Book _book;
   late final PageController _pageController;
-  final FlutterTts _tts = FlutterTts();
+  late final StreamSubscription _playSub;
+  late final StreamSubscription _eventSub;
 
   int _currentPage = 0;
   bool _speaking = false;
   bool _scanning = false;
-  bool _autoContinuingTts = false;
+  AppSettings _settings = AppSettings();
 
   @override
   void initState() {
     super.initState();
     _book = widget.book;
-    _pageController = PageController();
-    _tts.setCompletionHandler(() {
-      if (!_autoContinuingTts && mounted) setState(() => _speaking = false);
-      _autoContinuingTts = false;
+    final sameBook = audioHandler.book?.id == _book.id;
+    _currentPage = sameBook
+        ? audioHandler.pageIndex.clamp(0, max(0, _book.pages.length - 1))
+        : 0;
+    _pageController = PageController(initialPage: _currentPage);
+    _speaking = audioHandler.playbackState.value.playing && sameBook;
+
+    _playSub = audioHandler.playbackState.listen((s) {
+      if (mounted) setState(() => _speaking = s.playing);
     });
+    _eventSub = audioHandler.customEvent.listen((e) {
+      if (e is Map && e['pageIndex'] is int && mounted) {
+        final idx = e['pageIndex'] as int;
+        if (idx != _currentPage && idx >= 0 && idx < _book.pages.length) {
+          _pageController.animateToPage(
+            idx,
+            duration: const Duration(milliseconds: 350),
+            curve: Curves.easeInOut,
+          );
+        }
+      }
+    });
+
+    _initPlayback();
+  }
+
+  Future<void> _initPlayback() async {
+    final settings = await AppSettings.load();
+    if (!mounted) return;
+    setState(() => _settings = settings);
+    await audioHandler.loadBook(_book, _currentPage, speechRate: settings.speechRate);
   }
 
   @override
   void dispose() {
-    _tts.stop();
+    _playSub.cancel();
+    _eventSub.cancel();
     _pageController.dispose();
     super.dispose();
-  }
-
-  // ── TTS ─────────────────────────────────────────────────────────────────────
-
-  Future<void> _speakPage(int idx) async {
-    if (idx < 0 || idx >= _book.pages.length) return;
-    _autoContinuingTts = true;
-    await _tts.stop();
-    if (!mounted || !_speaking) return;
-    await _tts.setLanguage(_book.lang.ttsLocale);
-    await _tts.setSpeechRate(0.45);
-    await _tts.speak(_book.pages[idx].text);
   }
 
   Future<void> _toggleTts() async {
     if (_book.pages.isEmpty) return;
     if (_speaking) {
-      await _tts.stop();
-      setState(() => _speaking = false);
+      await audioHandler.pause();
     } else {
-      setState(() => _speaking = true);
-      await _speakPage(_currentPage);
+      await audioHandler.setPage(_currentPage);
+      await audioHandler.play();
     }
   }
 
   void _onPageChanged(int idx) {
-    final wasSpeaking = _speaking;
     setState(() => _currentPage = idx);
-    if (wasSpeaking) _speakPage(idx);
+    audioHandler.setPage(idx);
   }
-
-  // ── Scan (add new page) ──────────────────────────────────────────────────────
 
   Future<void> _scan() async {
     if (_scanning) return;
@@ -88,6 +103,7 @@ class _BookScreenState extends State<BookScreen> {
     await BookStorage.saveBook(_book);
     if (!mounted) return;
     setState(() => _scanning = false);
+    await audioHandler.loadBook(_book, _book.pages.length - 1, speechRate: _settings.speechRate);
     _pageController.animateToPage(
       _book.pages.length - 1,
       duration: const Duration(milliseconds: 400),
@@ -95,37 +111,50 @@ class _BookScreenState extends State<BookScreen> {
     );
   }
 
-  // ── Rescan current page ──────────────────────────────────────────────────────
-
   Future<void> _rescanCurrentPage() async {
     if (_scanning || _book.pages.isEmpty) return;
     final oldPage = _book.pages[_currentPage];
     final result = await _runScanPipeline();
     if (result == null || !mounted) return;
     final (imagePath, text) = result;
-    // delete old image
     try { await File(oldPage.imagePath).delete(); } catch (_) {}
     _book.pages[_currentPage] = oldPage.copyWith(imagePath: imagePath, text: text);
     await BookStorage.saveBook(_book);
+    await audioHandler.loadBook(_book, _currentPage, speechRate: _settings.speechRate);
     if (mounted) setState(() => _scanning = false);
   }
 
-  // ── Shared scan pipeline ─────────────────────────────────────────────────────
-
-  /// Returns (stableImagePath, normalizedText) or null on cancel/error.
   Future<(String, String)?> _runScanPipeline() async {
-    final dir = await getApplicationSupportDirectory();
-    final scanPath = p.join(dir.path, 'scan_${DateTime.now().millisecondsSinceEpoch}.jpeg');
-
-    final success = await FlutterEdgeDetection.detectEdge(
-      scanPath,
-      canUseGallery: true,
-      androidScanTitle: 'Scan document',
-      androidCropTitle: 'Crop',
-      androidCropBlackWhiteTitle: 'B&W',
-      androidCropReset: 'Reset',
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.camera_alt),
+              title: const Text('Camera'),
+              onTap: () => Navigator.pop(ctx, ImageSource.camera),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library),
+              title: const Text('Gallery'),
+              onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+            ),
+          ],
+        ),
+      ),
     );
-    if (!success || !mounted) return null;
+    if (source == null || !mounted) return null;
+
+    final picked = await ImagePicker().pickImage(source: source, imageQuality: 95);
+    if (picked == null || !mounted) return null;
+
+    final warped = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (_) => ScannerScreen(photoPath: picked.path)),
+    );
+    if (warped == null || !mounted) return null;
 
     setState(() => _scanning = true);
 
@@ -133,16 +162,21 @@ class _BookScreenState extends State<BookScreen> {
       final tmpDir = await getTemporaryDirectory();
       final tmpProcessed = p.join(tmpDir.path, 'processed_tmp.png');
 
-      final src = await cv.imreadAsync(scanPath);
+      final src = await cv.imreadAsync(warped);
       final gray = await cv.cvtColorAsync(src, cv.COLOR_BGR2GRAY);
       final blurred = await cv.gaussianBlurAsync(gray, (3, 3), 0);
-      final binary = await cv.adaptiveThresholdAsync(
+      var binary = await cv.adaptiveThresholdAsync(
         blurred, 255.0, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 25, 10.0,
       );
-      await cv.imwriteAsync(tmpProcessed, binary);
       src.dispose();
       gray.dispose();
       blurred.dispose();
+
+      final deskewed = await _deskew(binary);
+      if (!identical(deskewed, binary)) binary.dispose();
+      binary = deskewed;
+
+      await cv.imwriteAsync(tmpProcessed, binary);
       binary.dispose();
 
       final raw = await FlutterTesseractOcr.extractText(
@@ -167,7 +201,53 @@ class _BookScreenState extends State<BookScreen> {
     }
   }
 
-  // ── Delete current page ───────────────────────────────────────────────────────
+  Future<cv.Mat> _deskew(cv.Mat binary) async {
+    cv.Mat? edges;
+    cv.Mat? lines;
+    cv.Mat? rot;
+    try {
+      edges = await cv.cannyAsync(binary, 50, 150);
+      final minLen = min(binary.cols, binary.rows) * 0.2;
+      lines = await cv.HoughLinesPAsync(
+        edges, 1, pi / 180, 80,
+        minLineLength: minLen, maxLineGap: 20,
+      );
+      if (lines.rows == 0) return binary;
+
+      final angles = <double>[];
+      for (var i = 0; i < lines.rows; i++) {
+        final l = lines.at<cv.Vec4i>(i, 0);
+        final dx = (l.val3 - l.val1).toDouble();
+        final dy = (l.val4 - l.val2).toDouble();
+        var angle = atan2(dy, dx) * 180 / pi;
+        if (angle > 45) angle -= 90;
+        if (angle < -45) angle += 90;
+        if (angle.abs() < 15) angles.add(angle);
+      }
+      if (angles.isEmpty) return binary;
+      angles.sort();
+      final median = angles[angles.length ~/ 2];
+      if (median.abs() < 1) return binary;
+
+      rot = await cv.getRotationMatrix2DAsync(
+        cv.Point2f(binary.cols / 2, binary.rows / 2),
+        median,
+        1.0,
+      );
+      return await cv.warpAffineAsync(
+        binary,
+        rot,
+        (binary.cols, binary.rows),
+        borderValue: cv.Scalar(255, 255, 255, 255),
+      );
+    } catch (_) {
+      return binary;
+    } finally {
+      edges?.dispose();
+      lines?.dispose();
+      rot?.dispose();
+    }
+  }
 
   Future<void> _deleteCurrentPage() async {
     if (_book.pages.isEmpty) return;
@@ -191,10 +271,8 @@ class _BookScreenState extends State<BookScreen> {
     final page = _book.pages[_currentPage];
     try { await File(page.imagePath).delete(); } catch (_) {}
 
-    if (_speaking) {
-      _autoContinuingTts = true;
-      await _tts.stop();
-    }
+    final wasSpeaking = _speaking;
+    if (wasSpeaking) await audioHandler.pause();
 
     _book.pages.removeAt(_currentPage);
     await BookStorage.saveBook(_book);
@@ -202,16 +280,16 @@ class _BookScreenState extends State<BookScreen> {
     if (!mounted) return;
 
     if (_book.pages.isEmpty) {
-      setState(() { _currentPage = 0; _speaking = false; _autoContinuingTts = false; });
+      setState(() => _currentPage = 0);
+      await audioHandler.loadBook(_book, 0, speechRate: _settings.speechRate);
     } else {
       final newIdx = min(_currentPage, _book.pages.length - 1);
-      setState(() { _currentPage = newIdx; });
+      setState(() => _currentPage = newIdx);
       _pageController.jumpToPage(newIdx);
-      if (_speaking) _speakPage(newIdx);
+      await audioHandler.loadBook(_book, newIdx, speechRate: _settings.speechRate);
+      if (wasSpeaking) await audioHandler.play();
     }
   }
-
-  // ── Mark as read ─────────────────────────────────────────────────────────────
 
   Future<void> _toggleRead() async {
     if (_book.pages.isEmpty) return;
@@ -221,7 +299,63 @@ class _BookScreenState extends State<BookScreen> {
     setState(() {});
   }
 
-  // ── Navigation helpers ────────────────────────────────────────────────────────
+  Future<void> _exportText() async {
+    if (_book.pages.isEmpty) return;
+    final buf = StringBuffer();
+    for (var i = 0; i < _book.pages.length; i++) {
+      buf.writeln('--- Page ${i + 1} ---');
+      buf.writeln(_book.pages[i].text);
+      buf.writeln();
+    }
+    final dir = await getTemporaryDirectory();
+    final safeTitle = _book.title.replaceAll(RegExp(r'[^\w\s-]'), '').trim();
+    final file = File(p.join(dir.path, '${safeTitle.isEmpty ? 'book' : safeTitle}.txt'));
+    await file.writeAsString(buf.toString());
+    await Share.shareXFiles([XFile(file.path)], subject: _book.title);
+  }
+
+  void _showSettings() {
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) {
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(24, 24, 24, 32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text('Settings', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 20),
+                Text('Speech rate  ${_settings.speechRate.toStringAsFixed(2)}'),
+                Slider(
+                  min: 0.2,
+                  max: 0.8,
+                  value: _settings.speechRate,
+                  onChanged: (v) {
+                    setSheet(() => _settings.speechRate = v);
+                    audioHandler.setSpeechRate(v);
+                  },
+                  onChangeEnd: (_) => _settings.save(),
+                ),
+                Text('Font size  ${_settings.fontSize.round()}'),
+                Slider(
+                  min: 12,
+                  max: 28,
+                  value: _settings.fontSize,
+                  onChanged: (v) {
+                    setSheet(() => _settings.fontSize = v);
+                    setState(() {});
+                  },
+                  onChangeEnd: (_) => _settings.save(),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
 
   void _showJumpDialog() {
     if (_book.pages.isEmpty) return;
@@ -266,8 +400,6 @@ class _BookScreenState extends State<BookScreen> {
     }
   }
 
-  // ── Text normalization ────────────────────────────────────────────────────────
-
   String _normalizeForTts(String raw) {
     if (raw.isEmpty) return '';
     return raw
@@ -275,14 +407,11 @@ class _BookScreenState extends State<BookScreen> {
         .replaceAll(RegExp(r'\n{2,}'), '... ')
         .replaceAll('\n', ' ')
         .replaceAll(RegExp(r'[:;]'), '. ')
-        .replaceAll(',', ', ,')
-        .replaceAll(RegExp(r'\.(?!\.\.)'), '... ')
+        .replaceAll(RegExp(r'(?<!\d)\.(?!\.)'), '... ')
         .replaceAll(RegExp(r'[«»""„"\(\)\[\]\-\–\—\*]'), ' ')
         .replaceAll(RegExp(r' {2,}'), ' ')
         .trim();
   }
-
-  // ── Build ─────────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -294,6 +423,7 @@ class _BookScreenState extends State<BookScreen> {
         title: Text(_book.title, overflow: TextOverflow.ellipsis),
         actions: [
           _LangBadge(label: _book.lang.label),
+          IconButton(icon: const Icon(Icons.tune), onPressed: _showSettings, tooltip: 'Settings'),
           if (hasPages)
             IconButton(icon: const Icon(Icons.search), onPressed: _openSearch, tooltip: 'Search pages'),
           if (hasPages)
@@ -301,12 +431,19 @@ class _BookScreenState extends State<BookScreen> {
               icon: const Icon(Icons.more_vert),
               onSelected: (action) {
                 if (action == _PageAction.rescan) _rescanCurrentPage();
+                if (action == _PageAction.export) _exportText();
                 if (action == _PageAction.delete) _deleteCurrentPage();
               },
               itemBuilder: (_) => const [
                 PopupMenuItem(value: _PageAction.rescan, child: ListTile(
                   leading: Icon(Icons.document_scanner),
                   title: Text('Rescan this page'),
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                )),
+                PopupMenuItem(value: _PageAction.export, child: ListTile(
+                  leading: Icon(Icons.ios_share),
+                  title: Text('Export text'),
                   contentPadding: EdgeInsets.zero,
                   dense: true,
                 )),
@@ -331,15 +468,15 @@ class _BookScreenState extends State<BookScreen> {
   }
 
   Widget _buildEmpty() {
-    return Center(
+    return const Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.document_scanner, size: 72, color: Colors.white12),
-          const SizedBox(height: 20),
-          const Text('No pages yet', style: TextStyle(color: Colors.white54, fontSize: 20, fontWeight: FontWeight.w500)),
-          const SizedBox(height: 8),
-          const Text('Tap the scan button below', style: TextStyle(color: Colors.white30, fontSize: 14)),
+          Icon(Icons.document_scanner, size: 72, color: Colors.white12),
+          SizedBox(height: 20),
+          Text('No pages yet', style: TextStyle(color: Colors.white54, fontSize: 20, fontWeight: FontWeight.w500)),
+          SizedBox(height: 8),
+          Text('Tap the scan button below', style: TextStyle(color: Colors.white30, fontSize: 14)),
         ],
       ),
     );
@@ -362,7 +499,7 @@ class _BookScreenState extends State<BookScreen> {
           child: Image.file(
             File(page.imagePath),
             fit: BoxFit.contain,
-            errorBuilder: (_, __, ___) => const Center(
+            errorBuilder: (_, error, stack) => const Center(
               child: Icon(Icons.broken_image_outlined, size: 64, color: Colors.white24),
             ),
           ),
@@ -373,7 +510,7 @@ class _BookScreenState extends State<BookScreen> {
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
             child: SelectableText(
               page.text,
-              style: const TextStyle(color: Colors.white, fontSize: 15, height: 1.65),
+              style: TextStyle(color: Colors.white, fontSize: _settings.fontSize, height: 1.65),
             ),
           ),
         ),
@@ -406,7 +543,6 @@ class _BookScreenState extends State<BookScreen> {
         padding: const EdgeInsets.symmetric(horizontal: 4),
         child: Row(
           children: [
-            // Page indicator – tap to jump
             TextButton(
               onPressed: hasPages ? _showJumpDialog : null,
               style: TextButton.styleFrom(
@@ -416,7 +552,6 @@ class _BookScreenState extends State<BookScreen> {
               ),
               child: Text(hasPages ? '${_currentPage + 1} / ${_book.pages.length}' : '–'),
             ),
-            // Mark as read
             IconButton(
               iconSize: 26,
               icon: Icon(
@@ -427,18 +562,16 @@ class _BookScreenState extends State<BookScreen> {
               tooltip: page?.isRead == true ? 'Mark as unread' : 'Mark as read',
             ),
             const Spacer(),
-            // TTS play/stop
             IconButton(
               iconSize: 34,
               icon: Icon(
-                _speaking ? Icons.stop_circle_outlined : Icons.play_circle_outline,
+                _speaking ? Icons.pause_circle_outline : Icons.play_circle_outline,
                 color: _speaking ? Colors.redAccent : (hasPages ? Colors.white : Colors.white24),
               ),
               onPressed: hasPages ? _toggleTts : null,
-              tooltip: _speaking ? 'Stop' : 'Read aloud',
+              tooltip: _speaking ? 'Pause' : 'Read aloud',
             ),
             const SizedBox(width: 4),
-            // Scan
             IconButton(
               iconSize: 28,
               icon: _scanning
@@ -460,7 +593,7 @@ class _BookScreenState extends State<BookScreen> {
   }
 }
 
-enum _PageAction { rescan, delete }
+enum _PageAction { rescan, export, delete }
 
 class _LangBadge extends StatelessWidget {
   final String label;
@@ -526,7 +659,7 @@ class _PageSearchDelegate extends SearchDelegate<int?> {
 
     return ListView.separated(
       itemCount: filtered.length,
-      separatorBuilder: (_, __) => const Divider(height: 1, color: Colors.white10),
+      separatorBuilder: (_, i) => const Divider(height: 1, color: Colors.white10),
       itemBuilder: (context, i) {
         final idx = filtered[i].key;
         final page = filtered[i].value;
